@@ -29,12 +29,10 @@ export default function App() {
 
   useEffect(() => {
     loadCloudRecords();
+    loadCloudHistory();
 
     const savedSnapshots = localStorage.getItem("football_snapshots");
-    const savedHistory = localStorage.getItem("football_history");
-
     if (savedSnapshots) setSnapshots(JSON.parse(savedSnapshots));
-    if (savedHistory) setHistory(JSON.parse(savedHistory));
   }, []);
 
   useEffect(() => {
@@ -65,7 +63,7 @@ export default function App() {
       .order("created_at", { ascending: false });
 
     if (error) {
-      console.error("读取云端记录失败：", error);
+      console.error("读取云端推荐记录失败：", error);
       return;
     }
 
@@ -91,6 +89,34 @@ export default function App() {
           profit: r.profit || 0,
           createdAt: r.created_at,
           verifiedAt: r.verified_at,
+        }))
+      );
+    }
+  }
+
+  async function loadCloudHistory() {
+    const { data, error } = await supabase
+      .from("scan_history")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (error) {
+      console.error("读取云端扫描历史失败：", error);
+      return;
+    }
+
+    if (data) {
+      setHistory(
+        data.map((h) => ({
+          id: h.id,
+          time: h.time,
+          mode: h.mode,
+          total: h.total,
+          good: h.good,
+          changed: h.changed,
+          top: Array.isArray(h.top) ? h.top : [],
+          createdAt: h.created_at,
         }))
       );
     }
@@ -162,18 +188,16 @@ export default function App() {
     });
 
     await saveRecommendationsToCloud(withChange);
-
-    const nextHistory = saveScanHistory(withChange, mode);
+    await saveScanHistoryToCloud(withChange, mode);
 
     setMatches(withChange);
     setSnapshots(nextSnapshots);
-    setHistory(nextHistory);
     setLastUpdate(new Date().toLocaleTimeString());
 
     localStorage.setItem("football_snapshots", JSON.stringify(nextSnapshots));
-    localStorage.setItem("football_history", JSON.stringify(nextHistory));
 
     await loadCloudRecords();
+    await loadCloudHistory();
   }
 
   function parseOdds(data, leagueName) {
@@ -340,15 +364,12 @@ export default function App() {
         },
       ]);
 
-      if (error) {
-        console.error("保存云端推荐失败：", error);
-      }
+      if (error) console.error("保存云端推荐失败：", error);
     }
   }
 
-  function saveScanHistory(list, mode) {
+  async function saveScanHistoryToCloud(list, mode) {
     const h = {
-      id: Date.now(),
       time: new Date().toLocaleTimeString(),
       mode,
       total: list.length,
@@ -359,7 +380,9 @@ export default function App() {
         .map((m) => `${m.league}｜${m.match}｜${m.direction}｜${m.result}｜${m.score}分`),
     };
 
-    return [h, ...history].slice(0, 10);
+    const { error } = await supabase.from("scan_history").insert([h]);
+
+    if (error) console.error("保存云端扫描历史失败：", error);
   }
 
   async function verifyResults() {
@@ -439,7 +462,7 @@ export default function App() {
   }
 
   async function clearAll() {
-    if (!confirm("确定清空云端全部推荐记录吗？")) return;
+    if (!confirm("确定清空云端全部记录吗？")) return;
 
     const { error } = await supabase
       .from("matches")
@@ -447,15 +470,24 @@ export default function App() {
       .neq("match", "__never__");
 
     if (error) {
-      alert("清空失败，请检查 Supabase 权限");
+      alert("清空推荐记录失败，请检查 Supabase 权限");
       console.error(error);
       return;
+    }
+
+    const { error: historyError } = await supabase
+      .from("scan_history")
+      .delete()
+      .neq("mode", "__never__");
+
+    if (historyError) {
+      alert("推荐记录已清空，但扫描历史清空失败");
+      console.error(historyError);
     }
 
     setRecords([]);
     setHistory([]);
     setSnapshots({});
-    localStorage.removeItem("football_history");
     localStorage.removeItem("football_snapshots");
   }
 
@@ -487,7 +519,7 @@ export default function App() {
 
   return (
     <div style={pageStyle}>
-      <h1>AI足球盘口实时监控系统 V5.0</h1>
+      <h1>AI足球盘口实时监控系统 V5.1</h1>
 
       <div style={controlCard}>
         <select
@@ -535,12 +567,18 @@ export default function App() {
           赛果验证
         </button>
 
-        <button onClick={loadCloudRecords} style={{ ...buttonStyle, background: "#0ea5e9" }}>
+        <button
+          onClick={() => {
+            loadCloudRecords();
+            loadCloudHistory();
+          }}
+          style={{ ...buttonStyle, background: "#0ea5e9" }}
+        >
           同步云端
         </button>
 
         <button onClick={clearAll} style={{ ...buttonStyle, background: "#64748b" }}>
-          清空云端
+          清空云端记录
         </button>
       </div>
 
@@ -588,23 +626,22 @@ export default function App() {
         </div>
       )}
 
-      {history.length > 0 && (
-        <div style={statCard}>
-          <h2>扫描历史</h2>
-          {history.map((h) => (
-            <div key={h.id} style={historyItem}>
-              <p>
-                {h.time}｜{h.mode}｜总场数：{h.total}｜优质：{h.good}｜异动：{h.changed}
+      <div style={statCard}>
+        <h2>云端扫描历史</h2>
+        {history.length === 0 && <p style={{ color: "#94a3b8" }}>暂无扫描历史</p>}
+        {history.map((h) => (
+          <div key={h.id} style={historyItem}>
+            <p>
+              {h.time}｜{h.mode}｜总场数：{h.total}｜优质：{h.good}｜异动：{h.changed}
+            </p>
+            {h.top.map((t, i) => (
+              <p key={i} style={{ color: "#94a3b8" }}>
+                TOP{i + 1}：{t}
               </p>
-              {h.top.map((t, i) => (
-                <p key={i} style={{ color: "#94a3b8" }}>
-                  TOP{i + 1}：{t}
-                </p>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>
+        ))}
+      </div>
 
       <div style={statCard}>
         <h2>云端推荐记录</h2>
