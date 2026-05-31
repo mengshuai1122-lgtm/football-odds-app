@@ -6,12 +6,25 @@ const API_KEY = import.meta.env.VITE_ODDS_API_KEY;
 const leagues = [
   { name: "瑞典超", key: "soccer_sweden_allsvenskan" },
   { name: "挪超", key: "soccer_norway_eliteserien" },
-  { name: "MLS", key: "soccer_usa_mls" },
+  { name: "芬超", key: "soccer_finland_veikkausliiga" },
+  { name: "丹麦超", key: "soccer_denmark_superliga" },
   { name: "巴甲", key: "soccer_brazil_campeonato" },
+  { name: "巴乙", key: "soccer_brazil_serie_b" },
+  { name: "阿甲", key: "soccer_argentina_primera_division" },
+  { name: "美职联", key: "soccer_usa_mls" },
+  { name: "墨超", key: "soccer_mexico_ligamx" },
   { name: "英超", key: "soccer_epl" },
+  { name: "英冠", key: "soccer_efl_champ" },
   { name: "西甲", key: "soccer_spain_la_liga" },
   { name: "意甲", key: "soccer_italy_serie_a" },
   { name: "德甲", key: "soccer_germany_bundesliga" },
+  { name: "法甲", key: "soccer_france_ligue_one" },
+  { name: "荷甲", key: "soccer_netherlands_eredivisie" },
+  { name: "葡超", key: "soccer_portugal_primeira_liga" },
+  { name: "土超", key: "soccer_turkey_super_league" },
+  { name: "澳超", key: "soccer_australia_aleague" },
+  { name: "日职联", key: "soccer_japan_j_league" },
+  { name: "韩K联", key: "soccer_korea_kleague1" },
 ];
 
 export default function App() {
@@ -22,10 +35,13 @@ export default function App() {
   const [selectedLeague, setSelectedLeague] = useState(leagues[0]);
   const [loading, setLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoVerify, setAutoVerify] = useState(false);
   const [countdown, setCountdown] = useState(30);
+  const [verifyCountdown, setVerifyCountdown] = useState(300);
   const [onlyGood, setOnlyGood] = useState(false);
   const [onlyChanged, setOnlyChanged] = useState(false);
   const [lastUpdate, setLastUpdate] = useState("");
+  const [lastVerify, setLastVerify] = useState("");
 
   useEffect(() => {
     loadCloudRecords();
@@ -54,7 +70,28 @@ export default function App() {
       clearInterval(refreshTimer);
       clearInterval(countdownTimer);
     };
-  }, [autoRefresh, selectedLeague, matches, snapshots]);
+  }, [autoRefresh, selectedLeague, snapshots]);
+
+  useEffect(() => {
+    let verifyTimer;
+    let verifyCountdownTimer;
+
+    if (autoVerify) {
+      verifyTimer = setInterval(() => {
+        verifyResults(false);
+        setVerifyCountdown(300);
+      }, 300000);
+
+      verifyCountdownTimer = setInterval(() => {
+        setVerifyCountdown((v) => (v <= 1 ? 300 : v - 1));
+      }, 1000);
+    }
+
+    return () => {
+      clearInterval(verifyTimer);
+      clearInterval(verifyCountdownTimer);
+    };
+  }, [autoVerify, records]);
 
   async function loadCloudRecords() {
     const { data, error } = await supabase
@@ -68,30 +105,33 @@ export default function App() {
     }
 
     if (data) {
-      setRecords(
-        data.map((r) => ({
-          cloudId: r.id,
-          rawId: r.raw_id,
-          leagueKey: r.league_key,
-          league: r.league,
-          match: r.match,
-          home: r.home,
-          away: r.away,
-          line: r.line,
-          direction: r.direction,
-          score: r.score,
-          result: r.result,
-          status: r.status || "待验证",
-          finalScore: r.final_score || "",
-          outcome: r.outcome || "",
-          totalGoals: r.total_goals || "",
-          betOdds: r.bet_odds || 0,
-          profit: r.profit || 0,
-          createdAt: r.created_at,
-          verifiedAt: r.verified_at,
-        }))
-      );
+      setRecords(data.map(mapCloudRecord));
     }
+  }
+
+  function mapCloudRecord(r) {
+    return {
+      cloudId: r.id,
+      rawId: r.raw_id,
+      leagueKey: r.league_key,
+      league: r.league,
+      match: r.match,
+      home: r.home,
+      away: r.away,
+      line: Number(r.line || 0),
+      direction: r.direction,
+      score: r.score,
+      result: r.result,
+      status: r.status || "待验证",
+      finalScore: r.final_score || "",
+      outcome: r.outcome || "",
+      totalGoals: r.total_goals || "",
+      betOdds: Number(r.bet_odds || 0),
+      profit: Number(r.profit || 0),
+      roi: Number(r.roi || 0),
+      createdAt: r.created_at,
+      verifiedAt: r.verified_at,
+    };
   }
 
   async function loadCloudHistory() {
@@ -361,6 +401,8 @@ export default function App() {
           status: "待验证",
           bet_odds: m.betOdds || 0,
           profit: 0,
+          roi: 0,
+          created_at: new Date().toISOString(),
         },
       ]);
 
@@ -378,6 +420,7 @@ export default function App() {
       top: list
         .slice(0, 5)
         .map((m) => `${m.league}｜${m.match}｜${m.direction}｜${m.result}｜${m.score}分`),
+      created_at: new Date().toISOString(),
     };
 
     const { error } = await supabase.from("scan_history").insert([h]);
@@ -385,10 +428,50 @@ export default function App() {
     if (error) console.error("保存云端扫描历史失败：", error);
   }
 
-  async function verifyResults() {
+  function normalizeName(name) {
+    return String(name || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]/g, "");
+  }
+
+  function teamNameMatch(a, b) {
+    const x = normalizeName(a);
+    const y = normalizeName(b);
+    if (!x || !y) return false;
+    return x === y || x.includes(y) || y.includes(x);
+  }
+
+  function findScoreGame(scores, record) {
+    const byId = scores.find((s) => s.id && record.rawId && s.id === record.rawId);
+    if (byId) return byId;
+
+    const byTeam = scores.find(
+      (s) =>
+        teamNameMatch(s.home_team, record.home) &&
+        teamNameMatch(s.away_team, record.away)
+    );
+    if (byTeam) return byTeam;
+
+    return scores.find((s) => {
+      const allNames = [s.home_team, s.away_team].map(normalizeName).join("|");
+      return allNames.includes(normalizeName(record.home)) && allNames.includes(normalizeName(record.away));
+    });
+  }
+
+  function getTeamScore(game, teamName) {
+    if (!game?.scores || !Array.isArray(game.scores)) return NaN;
+
+    const item = game.scores.find((s) => teamNameMatch(s.name, teamName));
+    return Number(item?.score);
+  }
+
+  async function verifyResults(showAlert = true) {
     setLoading(true);
 
-    let nextRecords = [...records];
+    let updatedCount = 0;
+    const currentRecords = records.length ? records : await getRecordsForVerify();
 
     for (const league of leagues) {
       try {
@@ -398,26 +481,26 @@ export default function App() {
 
         if (!Array.isArray(scores)) continue;
 
-        for (const r of nextRecords) {
-          if (r.leagueKey !== league.key || r.status !== "待验证") continue;
+        const pending = currentRecords.filter(
+          (r) => r.leagueKey === league.key && r.status === "待验证"
+        );
 
-          const game = scores.find(
-           (s) =>
-             s.home_team === r.home &&
-             s.away_team === r.away
-       );
+        for (const r of pending) {
+          const game = findScoreGame(scores, r);
 
-       console.log("匹配结果", r.home, r.away, game);
+          console.log("赛果匹配：", r.match, game);
+
           if (!game || !game.completed || !game.scores) continue;
 
-          const homeScore = Number(game.scores.find((s) => s.name === r.home)?.score);
-          const awayScore = Number(game.scores.find((s) => s.name === r.away)?.score);
+          const homeScore = getTeamScore(game, r.home);
+          const awayScore = getTeamScore(game, r.away);
 
           if (isNaN(homeScore) || isNaN(awayScore)) continue;
 
           const total = homeScore + awayScore;
           let outcome = "走水";
           let profit = 0;
+          let roi = 0;
 
           if (r.direction === "大球") {
             if (total > r.line) outcome = "命中";
@@ -430,21 +513,17 @@ export default function App() {
           }
 
           if (outcome === "命中") {
-            profit = Number(((Number(r.betOdds || 1.85) - 1) * 1).toFixed(2));
+            profit = Number((Number(r.betOdds || 1.85) - 1).toFixed(2));
+            roi = Number((profit * 100).toFixed(1));
           } else if (outcome === "未中") {
             profit = -1;
+            roi = -100;
           } else {
             profit = 0;
+            roi = 0;
           }
 
-          r.status = "已完场";
-          r.finalScore = `${homeScore}-${awayScore}`;
-          r.totalGoals = total;
-          r.outcome = outcome;
-          r.profit = profit;
-          r.verifiedAt = new Date().toLocaleString();
-
-          await supabase
+          const { error } = await supabase
             .from("matches")
             .update({
               status: "已完场",
@@ -452,19 +531,40 @@ export default function App() {
               outcome,
               total_goals: total,
               profit,
+              roi,
               verified_at: new Date().toISOString(),
             })
             .eq("id", r.cloudId);
+
+          if (error) {
+            console.error("写入赛果失败：", error);
+            continue;
+          }
+
+          updatedCount += 1;
         }
       } catch (error) {
         console.log("赛果验证失败", league.name, error);
       }
     }
 
-    setRecords(nextRecords);
     await loadCloudRecords();
+    setLastVerify(new Date().toLocaleTimeString());
     setLoading(false);
-    alert("赛果验证完成");
+
+    if (showAlert) {
+      alert(`赛果验证完成，本次更新 ${updatedCount} 场`);
+    }
+  }
+
+  async function getRecordsForVerify() {
+    const { data, error } = await supabase
+      .from("matches")
+      .select("*")
+      .eq("status", "待验证");
+
+    if (error || !data) return [];
+    return data.map(mapCloudRecord);
   }
 
   async function clearAll() {
@@ -518,6 +618,19 @@ export default function App() {
   const totalProfit = settled.reduce((sum, r) => sum + Number(r.profit || 0), 0).toFixed(2);
   const roi = settled.length ? ((Number(totalProfit) / settled.length) * 100).toFixed(1) : "0.0";
 
+  const leagueStats = leagues.map((league) => {
+    const list = settled.filter((r) => r.league === league.name);
+    const leagueWins = list.filter((r) => r.outcome === "命中").length;
+    const leagueProfit = list.reduce((sum, r) => sum + Number(r.profit || 0), 0);
+    return {
+      name: league.name,
+      total: list.length,
+      wins: leagueWins,
+      winRate: list.length ? ((leagueWins / list.length) * 100).toFixed(1) : "0.0",
+      profit: leagueProfit.toFixed(2),
+    };
+  }).filter((x) => x.total > 0).sort((a, b) => Number(b.profit) - Number(a.profit));
+
   const topMatches = [...matches]
     .filter((m) => ["S级优质", "优质", "可打"].includes(m.result))
     .sort((a, b) => b.score - a.score)
@@ -525,7 +638,7 @@ export default function App() {
 
   return (
     <div style={pageStyle}>
-      <h1>AI足球盘口实时监控系统 V5.1</h1>
+      <h1>AI足球盘口实时监控系统 V6.0</h1>
 
       <div style={controlCard}>
         <select
@@ -541,7 +654,7 @@ export default function App() {
         </select>
 
         <button onClick={fetchCurrentLeague} style={buttonStyle}>
-          {loading ? "获取中..." : "获取当前联赛"}
+          {loading ? "处理中..." : "获取当前联赛"}
         </button>
 
         <button onClick={fetchAllLeagues} style={buttonStyle}>
@@ -553,6 +666,13 @@ export default function App() {
           style={{ ...buttonStyle, background: autoRefresh ? "#ef4444" : "#22c55e" }}
         >
           {autoRefresh ? `自动刷新中(${countdown}s)` : "开启自动刷新"}
+        </button>
+
+        <button
+          onClick={() => setAutoVerify(!autoVerify)}
+          style={{ ...buttonStyle, background: autoVerify ? "#ef4444" : "#14b8a6" }}
+        >
+          {autoVerify ? `自动验证中(${verifyCountdown}s)` : "开启自动验证"}
         </button>
 
         <button
@@ -569,7 +689,7 @@ export default function App() {
           {onlyChanged ? "显示全部" : "只看异动"}
         </button>
 
-        <button onClick={verifyResults} style={{ ...buttonStyle, background: "#6366f1" }}>
+        <button onClick={() => verifyResults(true)} style={{ ...buttonStyle, background: "#6366f1" }}>
           赛果验证
         </button>
 
@@ -589,7 +709,7 @@ export default function App() {
       </div>
 
       <p style={{ color: "#94a3b8" }}>
-        当前显示：{showMatches.length} 场 {lastUpdate && `｜最后刷新：${lastUpdate}`}
+        当前显示：{showMatches.length} 场 {lastUpdate && `｜最后刷新：${lastUpdate}`} {lastVerify && `｜最后验证：${lastVerify}`}
       </p>
 
       <div style={statGrid}>
@@ -612,6 +732,19 @@ export default function App() {
           </p>
         </div>
       </div>
+
+      {leagueStats.length > 0 && (
+        <div style={statCard}>
+          <h2>联赛盈利排行</h2>
+          {leagueStats.map((l, index) => (
+            <div key={l.name} style={historyItem}>
+              <p>
+                {index + 1}. {l.name}｜已验证：{l.total}｜命中：{l.wins}｜命中率：{l.winRate}%｜盈利：{l.profit}U
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
 
       {topMatches.length > 0 && (
         <div style={statCard}>
@@ -651,7 +784,7 @@ export default function App() {
 
       <div style={statCard}>
         <h2>云端推荐记录</h2>
-        {records.slice().reverse().slice(0, 30).map((r) => (
+        {records.slice().reverse().slice(0, 40).map((r) => (
           <div key={r.cloudId || r.rawId} style={historyItem}>
             <p>
               {r.league}｜{r.match}｜推荐：{r.direction}{r.line}｜赔率：{r.betOdds || "-"}｜评级：{r.result}｜状态：{r.status}
@@ -668,7 +801,7 @@ export default function App() {
                       : "#facc15",
                 }}
               >
-                比分：{r.finalScore}｜总进球：{r.totalGoals}｜结果：{r.outcome}｜盈利：{r.profit || 0}U
+                比分：{r.finalScore}｜总进球：{r.totalGoals}｜结果：{r.outcome}｜盈利：{r.profit || 0}U｜ROI：{r.roi || 0}%
               </p>
             )}
           </div>
