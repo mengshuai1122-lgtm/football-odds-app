@@ -607,6 +607,7 @@ export default function App() {
     });
   }
 
+  
   const showMatches = matches
     .filter((m) => (onlyGood ? m.result.includes("优质") : true))
     .filter((m) => (onlyChanged ? m.hasChange : true));
@@ -619,35 +620,24 @@ export default function App() {
   const roi = settled.length ? ((Number(totalProfit) / settled.length) * 100).toFixed(1) : "0.0";
 
   const leagueStats = leagues
-  .map((league) => {
-    const list = settled.filter((r) => r.league === league.name);
-    const leagueWins = list.filter((r) => r.outcome === "命中").length;
-    const leagueLosses = list.filter((r) => r.outcome === "未中").length;
-    const leagueProfit = list.reduce((sum, r) => sum + Number(r.profit || 0), 0);
+    .map((league) => {
+      const list = settled.filter((r) => r.league === league.name);
+      const leagueWins = list.filter((r) => r.outcome === "命中").length;
+      const leagueLosses = list.filter((r) => r.outcome === "未中").length;
+      const leagueProfit = list.reduce((sum, r) => sum + Number(r.profit || 0), 0);
 
-    return {
-      name: league.name,
-      total: list.length,
-      wins: leagueWins,
-      losses: leagueLosses,
-      winRate: list.length ? ((leagueWins / list.length) * 100).toFixed(1) : "0.0",
-      profit: leagueProfit.toFixed(2),
-      roi: list.length ? ((leagueProfit / list.length) * 100).toFixed(1) : "0.0",
-    };
-  })
-  .filter((x) => x.total > 0)
-  .sort((a, b) => Number(b.winRate) - Number(a.winRate));
-    const list = settled.filter((r) => r.league === league.name);
-    const leagueWins = list.filter((r) => r.outcome === "命中").length;
-    const leagueProfit = list.reduce((sum, r) => sum + Number(r.profit || 0), 0);
-    return {
-      name: league.name,
-      total: list.length,
-      wins: leagueWins,
-      winRate: list.length ? ((leagueWins / list.length) * 100).toFixed(1) : "0.0",
-      profit: leagueProfit.toFixed(2),
-    };
-  }).filter((x) => x.total > 0).sort((a, b) => Number(b.profit) - Number(a.profit));
+      return {
+        name: league.name,
+        total: list.length,
+        wins: leagueWins,
+        losses: leagueLosses,
+        winRate: list.length ? ((leagueWins / list.length) * 100).toFixed(1) : "0.0",
+        profit: leagueProfit.toFixed(2),
+        roi: list.length ? ((leagueProfit / list.length) * 100).toFixed(1) : "0.0",
+      };
+    })
+    .filter((x) => x.total > 0)
+    .sort((a, b) => Number(b.winRate) - Number(a.winRate));
 
   const topMatches = [...matches]
     .filter((m) => ["S级优质", "优质", "可打"].includes(m.result))
@@ -753,23 +743,20 @@ export default function App() {
 
       {leagueStats.length > 0 && (
         <div style={statCard}>
-          <h2>联赛盈利排行</h2>
-          {leagueStats.length > 0 && (
-  <div style={statCard}>
-    <h2>命中率排行榜</h2>
-    {leagueStats.map((l, index) => (
-      <div key={l.name} style={historyItem}>
-        <p>
-          {index === 0 ? "🥇" : index === 1 ? "🥈" : index === 2 ? "🥉" : `${index + 1}.`} 
-          {l.name}｜已验证：{l.total}｜命中：{l.wins}｜未中：{l.losses}
-        </p>
-        <p>
-          命中率：{l.winRate}%｜盈利：{l.profit}U｜ROI：{l.roi}%
-        </p>
-      </div>
-    ))}
-  </div>
-)}
+          <h2>命中率排行榜</h2>
+          {leagueStats.map((l, index) => (
+            <div key={l.name} style={historyItem}>
+              <p>
+                {index === 0 ? "🥇" : index === 1 ? "🥈" : index === 2 ? "🥉" : `${index + 1}.`}
+                {l.name}｜已验证：{l.total}｜命中：{l.wins}｜未中：{l.losses}
+              </p>
+              <p>
+                命中率：{l.winRate}%｜盈利：{l.profit}U｜ROI：{l.roi}%
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
 
       {topMatches.length > 0 && (
         <div style={statCard}>
