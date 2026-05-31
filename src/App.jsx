@@ -87,6 +87,8 @@ export default function App() {
           finalScore: r.final_score || "",
           outcome: r.outcome || "",
           totalGoals: r.total_goals || "",
+          betOdds: r.bet_odds || 0,
+          profit: r.profit || 0,
           createdAt: r.created_at,
           verifiedAt: r.verified_at,
         }))
@@ -155,9 +157,7 @@ export default function App() {
     });
 
     withChange.sort((a, b) => {
-      if (b.hasChange !== a.hasChange) {
-        return Number(b.hasChange) - Number(a.hasChange);
-      }
+      if (b.hasChange !== a.hasChange) return Number(b.hasChange) - Number(a.hasChange);
       return b.score - a.score;
     });
 
@@ -192,6 +192,13 @@ export default function App() {
       const analysis = analyzeMatch(leagueName, line, overPrice, underPrice);
       const leagueKey = leagues.find((l) => l.name === leagueName)?.key;
 
+      const betOdds =
+        analysis.direction === "大球"
+          ? overPrice
+          : analysis.direction === "小球"
+          ? underPrice
+          : 0;
+
       return {
         id: `${leagueName}-${game.id}`,
         rawId: game.id,
@@ -204,6 +211,7 @@ export default function App() {
         line,
         over: overPrice,
         under: underPrice,
+        betOdds,
         ...analysis,
       };
     });
@@ -273,32 +281,19 @@ export default function App() {
 
     const messages = [];
 
-    if (now.line > old.line) {
-      messages.push(`盘口升盘：${old.line} → ${now.line}，偏大增强`);
-    }
-
-    if (now.line < old.line) {
-      messages.push(`盘口降盘：${old.line} → ${now.line}，偏小增强`);
-    }
+    if (now.line > old.line) messages.push(`盘口升盘：${old.line} → ${now.line}，偏大增强`);
+    if (now.line < old.line) messages.push(`盘口降盘：${old.line} → ${now.line}，偏小增强`);
 
     if (now.over && old.over) {
       const diff = +(now.over - old.over).toFixed(2);
-      if (diff <= -0.05) {
-        messages.push(`大球赔率下降：${old.over} → ${now.over}`);
-      }
-      if (diff >= 0.05) {
-        messages.push(`大球赔率上升：${old.over} → ${now.over}`);
-      }
+      if (diff <= -0.05) messages.push(`大球赔率下降：${old.over} → ${now.over}`);
+      if (diff >= 0.05) messages.push(`大球赔率上升：${old.over} → ${now.over}`);
     }
 
     if (now.under && old.under) {
       const diff = +(now.under - old.under).toFixed(2);
-      if (diff <= -0.05) {
-        messages.push(`小球赔率下降：${old.under} → ${now.under}`);
-      }
-      if (diff >= 0.05) {
-        messages.push(`小球赔率上升：${old.under} → ${now.under}`);
-      }
+      if (diff <= -0.05) messages.push(`小球赔率下降：${old.under} → ${now.under}`);
+      if (diff >= 0.05) messages.push(`小球赔率上升：${old.under} → ${now.under}`);
     }
 
     return {
@@ -340,6 +335,8 @@ export default function App() {
           score: m.score,
           result: m.result,
           status: "待验证",
+          bet_odds: m.betOdds || 0,
+          profit: 0,
         },
       ]);
 
@@ -391,6 +388,7 @@ export default function App() {
 
           const total = homeScore + awayScore;
           let outcome = "走水";
+          let profit = 0;
 
           if (r.direction === "大球") {
             if (total > r.line) outcome = "命中";
@@ -402,10 +400,19 @@ export default function App() {
             else if (total > r.line) outcome = "未中";
           }
 
+          if (outcome === "命中") {
+            profit = Number(((Number(r.betOdds || 1.85) - 1) * 1).toFixed(2));
+          } else if (outcome === "未中") {
+            profit = -1;
+          } else {
+            profit = 0;
+          }
+
           r.status = "已完场";
           r.finalScore = `${homeScore}-${awayScore}`;
           r.totalGoals = total;
           r.outcome = outcome;
+          r.profit = profit;
           r.verifiedAt = new Date().toLocaleString();
 
           await supabase
@@ -415,6 +422,7 @@ export default function App() {
               final_score: `${homeScore}-${awayScore}`,
               outcome,
               total_goals: total,
+              profit,
               verified_at: new Date().toISOString(),
             })
             .eq("id", r.cloudId);
@@ -469,17 +477,22 @@ export default function App() {
   const wins = settled.filter((r) => r.outcome === "命中").length;
   const losses = settled.filter((r) => r.outcome === "未中").length;
   const winRate = settled.length ? ((wins / settled.length) * 100).toFixed(1) : "0.0";
+  const totalProfit = settled.reduce((sum, r) => sum + Number(r.profit || 0), 0).toFixed(2);
+  const roi = settled.length ? ((Number(totalProfit) / settled.length) * 100).toFixed(1) : "0.0";
+
+  const topMatches = [...matches]
+    .filter((m) => ["S级优质", "优质", "可打"].includes(m.result))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
 
   return (
     <div style={pageStyle}>
-      <h1>AI足球盘口实时监控系统 云端版</h1>
+      <h1>AI足球盘口实时监控系统 V5.0</h1>
 
       <div style={controlCard}>
         <select
           value={selectedLeague.key}
-          onChange={(e) =>
-            setSelectedLeague(leagues.find((l) => l.key === e.target.value))
-          }
+          onChange={(e) => setSelectedLeague(leagues.find((l) => l.key === e.target.value))}
           style={selectStyle}
         >
           {leagues.map((l) => (
@@ -535,12 +548,45 @@ export default function App() {
         当前显示：{showMatches.length} 场 {lastUpdate && `｜最后刷新：${lastUpdate}`}
       </p>
 
-      <div style={statCard}>
-        <h2>云端命中率统计</h2>
-        <p>
-          记录总数：{records.length}｜已验证：{settled.length}｜命中：{wins}｜未中：{losses}｜命中率：{winRate}%
-        </p>
+      <div style={statGrid}>
+        <div style={statCard}>
+          <h2>云端命中率统计</h2>
+          <p>记录总数：{records.length}</p>
+          <p>已验证：{settled.length}</p>
+          <p>命中：{wins}｜未中：{losses}</p>
+          <p>命中率：{winRate}%</p>
+        </div>
+
+        <div style={statCard}>
+          <h2>盈利统计</h2>
+          <p>默认每场：1U</p>
+          <p style={{ color: Number(totalProfit) >= 0 ? "#22c55e" : "#ef4444" }}>
+            理论盈利：{totalProfit} U
+          </p>
+          <p style={{ color: Number(roi) >= 0 ? "#22c55e" : "#ef4444" }}>
+            ROI：{roi}%
+          </p>
+        </div>
       </div>
+
+      {topMatches.length > 0 && (
+        <div style={statCard}>
+          <h2>今日TOP推荐榜</h2>
+          {topMatches.map((m, index) => (
+            <div key={m.id} style={historyItem}>
+              <h3>
+                {index === 0 ? "🥇" : index === 1 ? "🥈" : index === 2 ? "🥉" : "⭐"} {m.league}｜{m.match}
+              </h3>
+              <p>
+                推荐：{m.direction}{m.line}｜赔率：{m.betOdds || "-"}｜评级：{m.result}｜评分：{m.score}
+              </p>
+              <p style={{ color: m.hasChange ? "#f97316" : "#94a3b8" }}>
+                异动：{m.changeText}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
 
       {history.length > 0 && (
         <div style={statCard}>
@@ -565,7 +611,7 @@ export default function App() {
         {records.slice().reverse().slice(0, 30).map((r) => (
           <div key={r.cloudId || r.rawId} style={historyItem}>
             <p>
-              {r.league}｜{r.match}｜推荐：{r.direction}{r.line}｜评级：{r.result}｜状态：{r.status}
+              {r.league}｜{r.match}｜推荐：{r.direction}{r.line}｜赔率：{r.betOdds || "-"}｜评级：{r.result}｜状态：{r.status}
             </p>
 
             {r.status === "已完场" && (
@@ -579,7 +625,7 @@ export default function App() {
                       : "#facc15",
                 }}
               >
-                比分：{r.finalScore}｜总进球：{r.totalGoals}｜结果：{r.outcome}
+                比分：{r.finalScore}｜总进球：{r.totalGoals}｜结果：{r.outcome}｜盈利：{r.profit || 0}U
               </p>
             )}
           </div>
@@ -661,6 +707,13 @@ const controlCard = {
   background: "#1f2937",
   padding: 20,
   borderRadius: 12,
+};
+
+const statGrid = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+  gap: 20,
+  marginTop: 20,
 };
 
 const statCard = {
