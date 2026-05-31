@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
+import { supabase } from "./supabase";
 
 const API_KEY = import.meta.env.VITE_ODDS_API_KEY;
 
@@ -15,16 +16,26 @@ const leagues = [
 
 export default function App() {
   const [matches, setMatches] = useState([]);
+  const [records, setRecords] = useState([]);
+  const [snapshots, setSnapshots] = useState({});
   const [history, setHistory] = useState([]);
-  const [loading, setLoading] = useState(false);
   const [selectedLeague, setSelectedLeague] = useState(leagues[0]);
-  const [onlyGood, setOnlyGood] = useState(false);
-  const [onlyChanged, setOnlyChanged] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [countdown, setCountdown] = useState(30);
+  const [onlyGood, setOnlyGood] = useState(false);
+  const [onlyChanged, setOnlyChanged] = useState(false);
   const [lastUpdate, setLastUpdate] = useState("");
 
-  const previousMapRef = useRef({});
+  useEffect(() => {
+    loadCloudRecords();
+
+    const savedSnapshots = localStorage.getItem("football_snapshots");
+    const savedHistory = localStorage.getItem("football_history");
+
+    if (savedSnapshots) setSnapshots(JSON.parse(savedSnapshots));
+    if (savedHistory) setHistory(JSON.parse(savedHistory));
+  }, []);
 
   useEffect(() => {
     let refreshTimer;
@@ -32,12 +43,12 @@ export default function App() {
 
     if (autoRefresh) {
       refreshTimer = setInterval(() => {
-        fetchMatches();
+        fetchCurrentLeague();
         setCountdown(30);
       }, 30000);
 
       countdownTimer = setInterval(() => {
-        setCountdown((prev) => (prev <= 1 ? 30 : prev - 1));
+        setCountdown((v) => (v <= 1 ? 30 : v - 1));
       }, 1000);
     }
 
@@ -45,111 +56,127 @@ export default function App() {
       clearInterval(refreshTimer);
       clearInterval(countdownTimer);
     };
-  }, [autoRefresh, selectedLeague, matches]);
+  }, [autoRefresh, selectedLeague, matches, snapshots]);
 
-  function saveHistory(list, mode) {
-    const record = {
-      id: Date.now(),
-      time: new Date().toLocaleTimeString(),
-      mode,
-      total: list.length,
-      good: list.filter((m) => m.result.includes("优质")).length,
-      changed: list.filter((m) => m.hasChange).length,
-      top: list.slice(0, 3).map((m) => ({
-        match: m.match,
-        league: m.league,
-        result: m.result,
-        direction: m.direction,
-        score: m.score,
-      })),
-    };
+  async function loadCloudRecords() {
+    const { data, error } = await supabase
+      .from("matches")
+      .select("*")
+      .order("created_at", { ascending: false });
 
-    setHistory((prev) => [record, ...prev].slice(0, 10));
-  }
-
-  async function fetchMatches() {
-    setLoading(true);
-
-    try {
-      const data = await fetchLeague(selectedLeague);
-      const parsedMatches = parseGames(data, selectedLeague.name);
-
-      previousMapRef.current = buildPreviousMap(matches);
-
-      const withChanges = parsedMatches.map((m) =>
-        attachChangeInfo(m, previousMapRef.current[m.id])
-      );
-
-      withChanges.sort((a, b) => {
-        if (b.hasChange !== a.hasChange) return b.hasChange - a.hasChange;
-        return b.score - a.score;
-      });
-
-      setMatches(withChanges);
-      saveHistory(withChanges, selectedLeague.name);
-      setLastUpdate(new Date().toLocaleTimeString());
-    } catch (error) {
-      console.error(error);
-      alert("接口获取失败，请检查网络或API Key");
+    if (error) {
+      console.error("读取云端记录失败：", error);
+      return;
     }
 
+    if (data) {
+      setRecords(
+        data.map((r) => ({
+          cloudId: r.id,
+          rawId: r.raw_id,
+          leagueKey: r.league_key,
+          league: r.league,
+          match: r.match,
+          home: r.home,
+          away: r.away,
+          line: r.line,
+          direction: r.direction,
+          score: r.score,
+          result: r.result,
+          status: r.status || "待验证",
+          finalScore: r.final_score || "",
+          outcome: r.outcome || "",
+          totalGoals: r.total_goals || "",
+          createdAt: r.created_at,
+          verifiedAt: r.verified_at,
+        }))
+      );
+    }
+  }
+
+  async function fetchCurrentLeague() {
+    setLoading(true);
+    const list = await fetchLeagueOdds(selectedLeague);
+    await updateMatches(list, selectedLeague.name);
     setLoading(false);
   }
 
   async function fetchAllLeagues() {
     setLoading(true);
 
-    try {
-      previousMapRef.current = buildPreviousMap(matches);
+    let all = [];
 
-      let allMatches = [];
-
-      for (const league of leagues) {
-        try {
-          const data = await fetchLeague(league);
-          const parsed = parseGames(data, league.name);
-          allMatches = [...allMatches, ...parsed];
-        } catch (e) {
-          console.log(`${league.name} 获取失败`, e);
-        }
-      }
-
-      const withChanges = allMatches.map((m) =>
-        attachChangeInfo(m, previousMapRef.current[m.id])
-      );
-
-      withChanges.sort((a, b) => {
-        if (b.hasChange !== a.hasChange) return b.hasChange - a.hasChange;
-        return b.score - a.score;
-      });
-
-      setMatches(withChanges);
-      saveHistory(withChanges, "多联赛扫描");
-      setLastUpdate(new Date().toLocaleTimeString());
-    } catch (error) {
-      console.error(error);
-      alert("多联赛获取失败，请检查网络或API Key");
+    for (const league of leagues) {
+      const list = await fetchLeagueOdds(league);
+      all = [...all, ...parseOdds(list, league.name)];
     }
 
+    await finishUpdate(all, "多联赛扫描");
     setLoading(false);
   }
 
-  async function fetchLeague(league) {
-    const url =
-      `https://api.the-odds-api.com/v4/sports/${league.key}/odds/?apiKey=${API_KEY}&regions=eu&markets=totals&oddsFormat=decimal`;
+  async function fetchLeagueOdds(league) {
+    try {
+      const url = `https://api.the-odds-api.com/v4/sports/${league.key}/odds/?apiKey=${API_KEY}&regions=eu&markets=totals&oddsFormat=decimal`;
+      const res = await fetch(url);
+      const data = await res.json();
 
-    const response = await fetch(url);
-    const data = await response.json();
+      if (!Array.isArray(data)) {
+        console.log(`${league.name} 返回异常：`, data);
+        return [];
+      }
 
-    if (!Array.isArray(data)) {
-      console.log(`${league.name} 返回异常：`, data);
+      return data;
+    } catch (error) {
+      console.error(`${league.name} 获取失败：`, error);
       return [];
     }
-
-    return data;
   }
 
-  function parseGames(data, leagueName) {
+  async function updateMatches(data, leagueName) {
+    const parsed = parseOdds(data, leagueName);
+    await finishUpdate(parsed, leagueName);
+  }
+
+  async function finishUpdate(parsed, mode) {
+    const nextSnapshots = { ...snapshots };
+
+    const withChange = parsed.map((m) => {
+      const old = snapshots[m.id];
+      const change = getChange(m, old);
+
+      nextSnapshots[m.id] = {
+        line: m.line,
+        over: m.over,
+        under: m.under,
+      };
+
+      return { ...m, ...change };
+    });
+
+    withChange.sort((a, b) => {
+      if (b.hasChange !== a.hasChange) {
+        return Number(b.hasChange) - Number(a.hasChange);
+      }
+      return b.score - a.score;
+    });
+
+    await saveRecommendationsToCloud(withChange);
+
+    const nextHistory = saveScanHistory(withChange, mode);
+
+    setMatches(withChange);
+    setSnapshots(nextSnapshots);
+    setHistory(nextHistory);
+    setLastUpdate(new Date().toLocaleTimeString());
+
+    localStorage.setItem("football_snapshots", JSON.stringify(nextSnapshots));
+    localStorage.setItem("football_history", JSON.stringify(nextHistory));
+
+    await loadCloudRecords();
+  }
+
+  function parseOdds(data, leagueName) {
     return data.map((game) => {
       const bookmaker = game.bookmakers?.[0];
       const market = bookmaker?.markets?.find((m) => m.key === "totals");
@@ -158,16 +185,21 @@ export default function App() {
       const over = outcomes.find((o) => o.name === "Over");
       const under = outcomes.find((o) => o.name === "Under");
 
-      const line = over?.point || under?.point || "-";
-      const overPrice = over?.price || "-";
-      const underPrice = under?.price || "-";
+      const line = Number(over?.point || under?.point || 0);
+      const overPrice = Number(over?.price || 0);
+      const underPrice = Number(under?.price || 0);
 
-      const analysis = analyzeMatch(leagueName, overPrice, underPrice);
+      const analysis = analyzeMatch(leagueName, line, overPrice, underPrice);
+      const leagueKey = leagues.find((l) => l.name === leagueName)?.key;
 
       return {
         id: `${leagueName}-${game.id}`,
-        match: `${game.home_team} vs ${game.away_team}`,
+        rawId: game.id,
+        leagueKey,
         league: leagueName,
+        match: `${game.home_team} vs ${game.away_team}`,
+        home: game.home_team,
+        away: game.away_team,
         time: formatTime(game.commence_time),
         line,
         over: overPrice,
@@ -177,125 +209,50 @@ export default function App() {
     });
   }
 
-  function attachChangeInfo(current, previous) {
-    if (!previous) {
-      return {
-        ...current,
-        hasChange: false,
-        changeText: "首次获取，暂无历史对比",
-      };
-    }
-
-    const currentLine = Number(current.line);
-    const previousLine = Number(previous.line);
-    const currentOver = Number(current.over);
-    const previousOver = Number(previous.over);
-    const currentUnder = Number(current.under);
-    const previousUnder = Number(previous.under);
-
-    let hasChange = false;
-    let messages = [];
-
-    if (isValidNumber(currentLine) && isValidNumber(previousLine)) {
-      if (currentLine > previousLine) {
-        hasChange = true;
-        messages.push(`盘口升盘：${previous.line} → ${current.line}`);
-      }
-      if (currentLine < previousLine) {
-        hasChange = true;
-        messages.push(`盘口降盘：${previous.line} → ${current.line}`);
-      }
-    }
-
-    if (isValidNumber(currentOver) && isValidNumber(previousOver)) {
-      const diff = +(currentOver - previousOver).toFixed(2);
-      if (diff <= -0.05) {
-        hasChange = true;
-        messages.push(`大球赔率下降：${previous.over} → ${current.over}`);
-      }
-      if (diff >= 0.05) {
-        hasChange = true;
-        messages.push(`大球赔率上升：${previous.over} → ${current.over}`);
-      }
-    }
-
-    if (isValidNumber(currentUnder) && isValidNumber(previousUnder)) {
-      const diff = +(currentUnder - previousUnder).toFixed(2);
-      if (diff <= -0.05) {
-        hasChange = true;
-        messages.push(`小球赔率下降：${previous.under} → ${current.under}`);
-      }
-      if (diff >= 0.05) {
-        hasChange = true;
-        messages.push(`小球赔率上升：${previous.under} → ${current.under}`);
-      }
-    }
-
-    return {
-      ...current,
-      hasChange,
-      changeText: messages.length ? messages.join("；") : "暂无明显异动",
-    };
-  }
-
-  function buildPreviousMap(list) {
-    const map = {};
-    list.forEach((item) => {
-      map[item.id] = item;
-    });
-    return map;
-  }
-
-  function analyzeMatch(league, over, under) {
+  function analyzeMatch(league, line, over, under) {
     let score = 50;
     let direction = "观望";
+    let result = "观望";
     let reason = "";
 
-    const overNum = Number(over);
-    const underNum = Number(under);
-
-    if (!overNum || !underNum) {
+    if (!line || !over || !under) {
       return {
         direction: "观望",
-        score: 50,
         result: "无盘口",
-        reason: "暂未获取到完整大小球赔率",
+        score: 50,
+        reason: "暂未获取到完整大小球盘口",
       };
     }
 
-    if (underNum < overNum) {
+    if (over < under) {
+      direction = "大球";
+      score += 20;
+      reason = "大球赔率更低，市场偏向大球";
+    } else if (under < over) {
       direction = "小球";
       score += 20;
       reason = "小球赔率更低，市场偏向小球";
     }
 
-    if (overNum < underNum) {
-      direction = "大球";
-      score += 20;
-      reason = "大球赔率更低，市场偏向大球";
-    }
-
-    if (["巴甲", "英超", "意甲"].includes(league) && direction === "小球") {
-      score += 5;
-      reason += "，该联赛节奏相对谨慎";
-    }
-
-    if (["挪超", "瑞典超", "MLS", "德甲"].includes(league) && direction === "大球") {
+    if (["瑞典超", "挪超", "MLS", "德甲"].includes(league) && direction === "大球") {
       score += 8;
       reason += "，该联赛进攻属性较强";
     }
 
-    if (league === "MLS") {
-      reason += "，MLS后期波动较大，注意风险";
-      score -= 3;
+    if (["巴甲", "意甲"].includes(league) && direction === "小球") {
+      score += 5;
+      reason += "，该联赛节奏相对谨慎";
     }
 
-    if (Math.abs(overNum - underNum) < 0.08) {
+    if (Math.abs(over - under) < 0.08) {
       score -= 8;
       reason += "，大小球赔率差距较小，方向不够明显";
     }
 
-    let result = "观望";
+    if (league === "MLS") {
+      score -= 3;
+      reason += "，MLS后期波动大，注意风险";
+    }
 
     if (score >= 80) result = "S级优质";
     else if (score >= 72) result = "优质";
@@ -303,11 +260,195 @@ export default function App() {
     else if (score >= 54) result = "观望";
     else result = "不碰";
 
-    return { direction, score, result, reason };
+    return { direction, result, score, reason };
   }
 
-  function isValidNumber(value) {
-    return typeof value === "number" && !isNaN(value);
+  function getChange(now, old) {
+    if (!old) {
+      return {
+        hasChange: false,
+        changeText: "首次获取，暂无历史对比",
+      };
+    }
+
+    const messages = [];
+
+    if (now.line > old.line) {
+      messages.push(`盘口升盘：${old.line} → ${now.line}，偏大增强`);
+    }
+
+    if (now.line < old.line) {
+      messages.push(`盘口降盘：${old.line} → ${now.line}，偏小增强`);
+    }
+
+    if (now.over && old.over) {
+      const diff = +(now.over - old.over).toFixed(2);
+      if (diff <= -0.05) {
+        messages.push(`大球赔率下降：${old.over} → ${now.over}`);
+      }
+      if (diff >= 0.05) {
+        messages.push(`大球赔率上升：${old.over} → ${now.over}`);
+      }
+    }
+
+    if (now.under && old.under) {
+      const diff = +(now.under - old.under).toFixed(2);
+      if (diff <= -0.05) {
+        messages.push(`小球赔率下降：${old.under} → ${now.under}`);
+      }
+      if (diff >= 0.05) {
+        messages.push(`小球赔率上升：${old.under} → ${now.under}`);
+      }
+    }
+
+    return {
+      hasChange: messages.length > 0,
+      changeText: messages.length ? messages.join("；") : "暂无明显异动",
+    };
+  }
+
+  async function saveRecommendationsToCloud(list) {
+    const useful = list.filter(
+      (m) => ["S级优质", "优质", "可打"].includes(m.result) && m.direction !== "观望"
+    );
+
+    for (const m of useful) {
+      const { data: exists, error: checkError } = await supabase
+        .from("matches")
+        .select("id")
+        .eq("raw_id", m.rawId)
+        .eq("league", m.league)
+        .limit(1);
+
+      if (checkError) {
+        console.error("检查云端记录失败：", checkError);
+        continue;
+      }
+
+      if (exists && exists.length > 0) continue;
+
+      const { error } = await supabase.from("matches").insert([
+        {
+          raw_id: m.rawId,
+          league_key: m.leagueKey,
+          match: m.match,
+          league: m.league,
+          home: m.home,
+          away: m.away,
+          line: m.line,
+          direction: m.direction,
+          score: m.score,
+          result: m.result,
+          status: "待验证",
+        },
+      ]);
+
+      if (error) {
+        console.error("保存云端推荐失败：", error);
+      }
+    }
+  }
+
+  function saveScanHistory(list, mode) {
+    const h = {
+      id: Date.now(),
+      time: new Date().toLocaleTimeString(),
+      mode,
+      total: list.length,
+      good: list.filter((m) => m.result.includes("优质")).length,
+      changed: list.filter((m) => m.hasChange).length,
+      top: list
+        .slice(0, 5)
+        .map((m) => `${m.league}｜${m.match}｜${m.direction}｜${m.result}｜${m.score}分`),
+    };
+
+    return [h, ...history].slice(0, 10);
+  }
+
+  async function verifyResults() {
+    setLoading(true);
+
+    let nextRecords = [...records];
+
+    for (const league of leagues) {
+      try {
+        const url = `https://api.the-odds-api.com/v4/sports/${league.key}/scores/?apiKey=${API_KEY}&daysFrom=3`;
+        const res = await fetch(url);
+        const scores = await res.json();
+
+        if (!Array.isArray(scores)) continue;
+
+        for (const r of nextRecords) {
+          if (r.leagueKey !== league.key || r.status !== "待验证") continue;
+
+          const game = scores.find((s) => s.id === r.rawId);
+          if (!game || !game.completed || !game.scores) continue;
+
+          const homeScore = Number(game.scores.find((s) => s.name === r.home)?.score);
+          const awayScore = Number(game.scores.find((s) => s.name === r.away)?.score);
+
+          if (isNaN(homeScore) || isNaN(awayScore)) continue;
+
+          const total = homeScore + awayScore;
+          let outcome = "走水";
+
+          if (r.direction === "大球") {
+            if (total > r.line) outcome = "命中";
+            else if (total < r.line) outcome = "未中";
+          }
+
+          if (r.direction === "小球") {
+            if (total < r.line) outcome = "命中";
+            else if (total > r.line) outcome = "未中";
+          }
+
+          r.status = "已完场";
+          r.finalScore = `${homeScore}-${awayScore}`;
+          r.totalGoals = total;
+          r.outcome = outcome;
+          r.verifiedAt = new Date().toLocaleString();
+
+          await supabase
+            .from("matches")
+            .update({
+              status: "已完场",
+              final_score: `${homeScore}-${awayScore}`,
+              outcome,
+              total_goals: total,
+              verified_at: new Date().toISOString(),
+            })
+            .eq("id", r.cloudId);
+        }
+      } catch (error) {
+        console.log("赛果验证失败", league.name, error);
+      }
+    }
+
+    setRecords(nextRecords);
+    await loadCloudRecords();
+    setLoading(false);
+    alert("赛果验证完成");
+  }
+
+  async function clearAll() {
+    if (!confirm("确定清空云端全部推荐记录吗？")) return;
+
+    const { error } = await supabase
+      .from("matches")
+      .delete()
+      .neq("match", "__never__");
+
+    if (error) {
+      alert("清空失败，请检查 Supabase 权限");
+      console.error(error);
+      return;
+    }
+
+    setRecords([]);
+    setHistory([]);
+    setSnapshots({});
+    localStorage.removeItem("football_history");
+    localStorage.removeItem("football_snapshots");
   }
 
   function formatTime(time) {
@@ -324,45 +465,43 @@ export default function App() {
     .filter((m) => (onlyGood ? m.result.includes("优质") : true))
     .filter((m) => (onlyChanged ? m.hasChange : true));
 
+  const settled = records.filter((r) => r.status === "已完场" && r.outcome !== "走水");
+  const wins = settled.filter((r) => r.outcome === "命中").length;
+  const losses = settled.filter((r) => r.outcome === "未中").length;
+  const winRate = settled.length ? ((wins / settled.length) * 100).toFixed(1) : "0.0";
+
   return (
     <div style={pageStyle}>
-      <h1 style={{ fontSize: 40 }}>AI足球盘口实时监控系统</h1>
+      <h1>AI足球盘口实时监控系统 云端版</h1>
 
       <div style={controlCard}>
         <select
           value={selectedLeague.key}
-          onChange={(e) => {
-            const league = leagues.find((l) => l.key === e.target.value);
-            setSelectedLeague(league);
-          }}
+          onChange={(e) =>
+            setSelectedLeague(leagues.find((l) => l.key === e.target.value))
+          }
           style={selectStyle}
         >
-          {leagues.map((league) => (
-            <option key={league.key} value={league.key}>
-              {league.name}
+          {leagues.map((l) => (
+            <option key={l.key} value={l.key}>
+              {l.name}
             </option>
           ))}
         </select>
 
-        <button onClick={fetchMatches} style={buttonStyle}>
+        <button onClick={fetchCurrentLeague} style={buttonStyle}>
           {loading ? "获取中..." : "获取当前联赛"}
         </button>
 
         <button onClick={fetchAllLeagues} style={buttonStyle}>
-          {loading ? "扫描中..." : "多联赛扫描"}
+          多联赛扫描
         </button>
 
         <button
-          onClick={() => {
-            setAutoRefresh(!autoRefresh);
-            setCountdown(30);
-          }}
-          style={{
-            ...buttonStyle,
-            background: autoRefresh ? "#ef4444" : "#22c55e",
-          }}
+          onClick={() => setAutoRefresh(!autoRefresh)}
+          style={{ ...buttonStyle, background: autoRefresh ? "#ef4444" : "#22c55e" }}
         >
-          {autoRefresh ? `自动刷新中 (${countdown}s)` : "开启自动刷新"}
+          {autoRefresh ? `自动刷新中(${countdown}s)` : "开启自动刷新"}
         </button>
 
         <button
@@ -379,30 +518,41 @@ export default function App() {
           {onlyChanged ? "显示全部" : "只看异动"}
         </button>
 
-        <button
-          onClick={() => setHistory([])}
-          style={{ ...buttonStyle, background: "#64748b" }}
-        >
-          清空历史
+        <button onClick={verifyResults} style={{ ...buttonStyle, background: "#6366f1" }}>
+          赛果验证
+        </button>
+
+        <button onClick={loadCloudRecords} style={{ ...buttonStyle, background: "#0ea5e9" }}>
+          同步云端
+        </button>
+
+        <button onClick={clearAll} style={{ ...buttonStyle, background: "#64748b" }}>
+          清空云端
         </button>
       </div>
 
       <p style={{ color: "#94a3b8" }}>
-        当前显示：{showMatches.length} 场
-        {lastUpdate && `｜最后刷新：${lastUpdate}`}
+        当前显示：{showMatches.length} 场 {lastUpdate && `｜最后刷新：${lastUpdate}`}
       </p>
 
+      <div style={statCard}>
+        <h2>云端命中率统计</h2>
+        <p>
+          记录总数：{records.length}｜已验证：{settled.length}｜命中：{wins}｜未中：{losses}｜命中率：{winRate}%
+        </p>
+      </div>
+
       {history.length > 0 && (
-        <div style={historyCard}>
-          <h2>历史记录</h2>
+        <div style={statCard}>
+          <h2>扫描历史</h2>
           {history.map((h) => (
             <div key={h.id} style={historyItem}>
               <p>
                 {h.time}｜{h.mode}｜总场数：{h.total}｜优质：{h.good}｜异动：{h.changed}
               </p>
-              {h.top.map((m, index) => (
-                <p key={index} style={{ color: "#94a3b8" }}>
-                  TOP{index + 1}：{m.league}｜{m.match}｜{m.direction}｜{m.result}｜{m.score}分
+              {h.top.map((t, i) => (
+                <p key={i} style={{ color: "#94a3b8" }}>
+                  TOP{i + 1}：{t}
                 </p>
               ))}
             </div>
@@ -410,42 +560,86 @@ export default function App() {
         </div>
       )}
 
-      <div style={{ marginTop: 30 }}>
-        {showMatches.map((item) => (
+      <div style={statCard}>
+        <h2>云端推荐记录</h2>
+        {records.slice().reverse().slice(0, 30).map((r) => (
+          <div key={r.cloudId || r.rawId} style={historyItem}>
+            <p>
+              {r.league}｜{r.match}｜推荐：{r.direction}{r.line}｜评级：{r.result}｜状态：{r.status}
+            </p>
+
+            {r.status === "已完场" && (
+              <p
+                style={{
+                  color:
+                    r.outcome === "命中"
+                      ? "#22c55e"
+                      : r.outcome === "未中"
+                      ? "#ef4444"
+                      : "#facc15",
+                }}
+              >
+                比分：{r.finalScore}｜总进球：{r.totalGoals}｜结果：{r.outcome}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div>
+        {showMatches.map((m) => (
           <div
-            key={item.id}
+            key={m.id}
             style={{
               ...cardStyle,
-              border: item.hasChange ? "2px solid #f97316" : "1px solid transparent",
+              border: m.hasChange ? "2px solid #f97316" : "1px solid transparent",
             }}
           >
-            {item.hasChange && <div style={changeBadge}>盘口异动</div>}
+            {m.hasChange && <div style={badgeStyle}>盘口异动</div>}
 
-            <h2>{item.match}</h2>
-            <p>开赛时间：{item.time}</p>
-            <p>联赛：{item.league}</p>
-            <p>大小球盘口：{item.line}</p>
-            <p>大球赔率：{item.over}</p>
-            <p>小球赔率：{item.under}</p>
+            <h2>{m.match}</h2>
+            <p>开赛时间：{m.time}</p>
+            <p>联赛：{m.league}</p>
+            <p>大小球盘口：{m.line}</p>
+            <p>大球赔率：{m.over}</p>
+            <p>小球赔率：{m.under}</p>
 
             <h3>
               推荐方向：
-              <span style={{ color: item.direction === "小球" ? "#22c55e" : item.direction === "大球" ? "#ef4444" : "#94a3b8" }}>
-                {item.direction}
+              <span
+                style={{
+                  color:
+                    m.direction === "大球"
+                      ? "#ef4444"
+                      : m.direction === "小球"
+                      ? "#22c55e"
+                      : "#94a3b8",
+                }}
+              >
+                {m.direction}
               </span>
             </h3>
 
             <h3>
               系统评级：
-              <span style={{ color: item.result.includes("优质") ? "#22c55e" : item.result === "可打" ? "#facc15" : "#ef4444" }}>
-                {item.result}
+              <span
+                style={{
+                  color:
+                    m.result.includes("优质")
+                      ? "#22c55e"
+                      : m.result === "可打"
+                      ? "#facc15"
+                      : "#ef4444",
+                }}
+              >
+                {m.result}
               </span>
             </h3>
 
-            <p>评分：{item.score}</p>
-            <p>分析理由：{item.reason}</p>
-            <p style={{ color: item.hasChange ? "#f97316" : "#94a3b8" }}>
-              异动追踪：{item.changeText}
+            <p>评分：{m.score}</p>
+            <p>分析理由：{m.reason}</p>
+            <p style={{ color: m.hasChange ? "#f97316" : "#94a3b8" }}>
+              异动追踪：{m.changeText}
             </p>
           </div>
         ))}
@@ -467,10 +661,9 @@ const controlCard = {
   background: "#1f2937",
   padding: 20,
   borderRadius: 12,
-  marginTop: 20,
 };
 
-const historyCard = {
+const statCard = {
   background: "#0f172a",
   padding: 20,
   borderRadius: 12,
@@ -493,21 +686,18 @@ const cardStyle = {
   position: "relative",
 };
 
-const changeBadge = {
+const badgeStyle = {
   position: "absolute",
   top: 12,
   right: 12,
   background: "#f97316",
-  color: "white",
   padding: "6px 12px",
   borderRadius: 999,
-  fontSize: 14,
 };
 
 const selectStyle = {
   padding: "12px 18px",
   borderRadius: 8,
-  border: "none",
   marginRight: 10,
   fontSize: 16,
 };
