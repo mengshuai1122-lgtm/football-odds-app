@@ -401,7 +401,13 @@ export default function App() {
         for (const r of nextRecords) {
           if (r.leagueKey !== league.key || r.status !== "待验证") continue;
 
-          const game = scores.find((s) => s.id === r.rawId);
+          const game = scores.find(
+           (s) =>
+             s.home_team === r.home &&
+             s.away_team === r.away
+       );
+
+       console.log("匹配结果", r.home, r.away, game);
           if (!game || !game.completed || !game.scores) continue;
 
           const homeScore = Number(game.scores.find((s) => s.name === r.home)?.score);
