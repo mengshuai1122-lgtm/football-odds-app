@@ -1,4 +1,4 @@
-import Login from "./Login";
+import Login from "./login";
 import React, { useState, useEffect } from "react";
 import { supabase } from "./supabase";
 
@@ -30,16 +30,7 @@ const leagues = [
 
 export default function App() {
   const [user, setUser] = useState(null);
-
-useEffect(() => {
-  supabase.auth.getUser().then(({ data }) => {
-    if (data?.user) setUser(data.user);
-  });
-}, []);
-
-if (!user) {
-  return <Login onLogin={setUser} />;
-}
+  const [authChecked, setAuthChecked] = useState(false);
   const [matches, setMatches] = useState([]);
   const [records, setRecords] = useState([]);
   const [snapshots, setSnapshots] = useState({});
@@ -56,12 +47,28 @@ if (!user) {
   const [lastVerify, setLastVerify] = useState("");
 
   useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      if (data?.user) setUser(data.user);
+      setAuthChecked(true);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user || null);
+    });
+
+    return () => {
+      listener?.subscription?.unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
     loadCloudRecords();
     loadCloudHistory();
 
     const savedSnapshots = localStorage.getItem("football_snapshots");
     if (savedSnapshots) setSnapshots(JSON.parse(savedSnapshots));
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     let refreshTimer;
@@ -104,6 +111,23 @@ if (!user) {
       clearInterval(verifyCountdownTimer);
     };
   }, [autoVerify, records]);
+
+  if (!authChecked) {
+    return (
+      <div style={pageStyle}>
+        <h2>正在检查登录状态...</h2>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login onLogin={setUser} />;
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    setUser(null);
+  }
 
   async function loadCloudRecords() {
     const { data, error } = await supabase
@@ -725,6 +749,10 @@ if (!user) {
 
         <button onClick={clearAll} style={{ ...buttonStyle, background: "#64748b" }}>
           清空云端记录
+        </button>
+
+        <button onClick={handleLogout} style={{ ...buttonStyle, background: "#ef4444" }}>
+          退出登录
         </button>
       </div>
 
