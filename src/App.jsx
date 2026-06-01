@@ -1,3 +1,4 @@
+import Login from "./Login";
 import React, { useState, useEffect } from "react";
 import { supabase } from "./supabase";
 
@@ -28,6 +29,17 @@ const leagues = [
 ];
 
 export default function App() {
+  const [user, setUser] = useState(null);
+
+useEffect(() => {
+  supabase.auth.getUser().then(({ data }) => {
+    if (data?.user) setUser(data.user);
+  });
+}, []);
+
+if (!user) {
+  return <Login onLogin={setUser} />;
+}
   const [matches, setMatches] = useState([]);
   const [records, setRecords] = useState([]);
   const [snapshots, setSnapshots] = useState({});
